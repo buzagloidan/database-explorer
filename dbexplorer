@@ -1,0 +1,121 @@
+import logging
+import sqlite3
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+DB_PATH = os.getenv("DB_PATH")
+
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Welcome! Use /search <query> to find records.\n"
+        "Examples:\n"
+        "/search עידן בוזגלו -> Exact first & last name\n"
+        "/search 123456 -> By ID\n"
+        "/search עידן בוזגלו ראשון -> First & last name AND partial city (address)\n"
+        "/search עידן -> Partial search by first or last name"
+    )
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Use /search <query> to find records.\n\n"
+        "Search modes:\n"
+        "1. One word numeric (e.g., /search 12345): search by exact ID.\n"
+        "2. One word non-numeric (e.g., /search עידן): partial search by first or last name.\n"
+        "3. Two words (e.g., /search עידן בוזגלו): exact first and last name.\n"
+        "4. Three words (e.g., /search עידן בוזגלו ראשון): first name, last name AND partial city/address match."
+    )
+
+async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = ' '.join(context.args).strip()
+    if not query:
+        await update.message.reply_text("Please provide a search term. For example: /search עידן")
+        return
+
+    query_terms = query.split()
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    # The table structure is assumed as:
+    # records(o, f, l, v, p, a, s, t, vo, ci)
+    # Indices: 0:o, 1:f, 2:l, 3:v, 4:p, 5:a, 6:s, 7:t, 8:vo, 9:ci
+    # v is considered the ID field, a is the address field.
+
+    if len(query_terms) == 1:
+        term = query_terms[0]
+        if term.isdigit():
+            # Exact ID match on 'v'
+            sql = "SELECT o, f, l, v, p, a, s, t, vo, ci FROM records WHERE v = ? LIMIT 50"
+            params = (term,)
+        else:
+            # Partial match on first or last name
+            sql = "SELECT o, f, l, v, p, a, s, t, vo, ci FROM records WHERE f LIKE ? OR l LIKE ? LIMIT 50"
+            params = (f"%{term}%", f"%{term}%")
+
+    elif len(query_terms) == 2:
+        # Exact first name and last name
+        first_name, last_name = query_terms
+        sql = "SELECT o, f, l, v, p, a, s, t, vo, ci FROM records WHERE f = ? AND l = ? LIMIT 50"
+        params = (first_name, last_name)
+
+    elif len(query_terms) == 3:
+        # First name, last name, and partial city/address
+        # We'll treat the third term as a partial match on 'a' (the address field).
+        first_name, last_name, city_part = query_terms
+        sql = ("SELECT o, f, l, v, p, a, s, t, vo, ci FROM records "
+               "WHERE f LIKE ? AND l LIKE ? AND a LIKE ? LIMIT 50")
+        params = (f"%{first_name}%", f"%{last_name}%", f"%{city_part}%")
+
+    else:
+        await update.message.reply_text("Too many terms. Please use 1 to 3 terms as described in /help.")
+        conn.close()
+        return
+
+    cur.execute(sql, params)
+    rows = cur.fetchall()
+    conn.close()
+
+    if not rows:
+        await update.message.reply_text("No results found for your query.")
+        return
+
+    # Format the results
+    messages = []
+    for row in rows:
+        # row = (o, f, l, v, p, a, s, t, vo, ci)
+        # *שם* : f l
+        # *תעודת זהות* : v
+        # *כתובת* : a (partial city/address)
+        record_msg = (
+            "\u200F"  # RTL mark if needed
+            f"*שם מלא*: {row[1]} {row[2]}\n"
+            f"*תעודת זהות*: {row[3]}\n"
+            f"*כתובת*: {row[5]}"
+        )
+        messages.append(record_msg)
+
+    final_message = "\n\n".join(messages)
+    await update.message.reply_text(final_message, parse_mode="Markdown")
+
+def main():
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("search", search_command))
+
+    application.run_polling()
+
+if __name__ == '__main__':
+    main()
